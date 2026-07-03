@@ -4,6 +4,8 @@ interface ModelPricing {
 }
 
 const MODEL_PRICING: Record<string, ModelPricing> = {
+	'claude-fable-5': { inputPerMTok: 10.0, outputPerMTok: 50.0 },
+
 	'claude-opus-4-8': { inputPerMTok: 5.0, outputPerMTok: 25.0 },
 	'claude-opus-4-7': { inputPerMTok: 5.0, outputPerMTok: 25.0 },
 	'claude-opus-4-6': { inputPerMTok: 5.0, outputPerMTok: 25.0 },

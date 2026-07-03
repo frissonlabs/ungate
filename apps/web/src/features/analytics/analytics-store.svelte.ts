@@ -168,6 +168,8 @@ const PROVIDER_OPTIONS: ProviderOption[] = [
 // Labels map — exact model names from DB (after normalizeModelName).
 // Dated variants are the actual stored names for 4.5 models.
 const MODEL_LABELS: Record<string, string> = {
+	// Fable series (used as-is)
+	'claude-fable-5': 'Claude Fable 5',
 	// 4.8 series (used as-is)
 	'claude-opus-4-8': 'Claude Opus 4.8',
 	// 4.7 series (used as-is)
