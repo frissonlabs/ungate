@@ -1,7 +1,7 @@
 import * as os from 'node:os';
 import * as path from 'node:path';
 
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => {
 	return {
@@ -9,14 +9,7 @@ const mocks = vi.hoisted(() => {
 		renameSyncMock: vi.fn(),
 		installMock: vi.fn(),
 		useMock: vi.fn(),
-		binExport: '/dev/cloudflared-package/bin/cloudflared',
-		findCloudflaredPidsForPortMock: vi.fn(() => [] as number[]),
-		isProcessAliveMock: vi.fn(() => false),
-		killProcessMock: vi.fn(() => false),
-		tunnelQuickMock: vi.fn(),
-		runtimeMutateMock: vi.fn((mutator: (state: { tunnel: Record<string, unknown> }) => unknown) =>
-			Promise.resolve(mutator({ tunnel: { pid: null } }))
-		)
+		binExport: '/dev/cloudflared-package/bin/cloudflared'
 	};
 });
 
@@ -26,7 +19,10 @@ vi.mock('cloudflared', () => {
 		install: mocks.installMock,
 		use: mocks.useMock,
 		Tunnel: {
-			quick: (...args: unknown[]) => mocks.tunnelQuickMock(...args)
+			quick: vi.fn(() => ({
+				on: vi.fn(),
+				stop: vi.fn()
+			}))
 		}
 	};
 });
@@ -41,19 +37,11 @@ vi.mock('node:fs', async (importOriginal) => {
 	};
 });
 
-vi.mock('../../src/utils/cloudflared-process', () => {
-	return {
-		findCloudflaredPidsForPort: mocks.findCloudflaredPidsForPortMock,
-		isProcessAlive: mocks.isProcessAliveMock,
-		killProcess: mocks.killProcessMock
-	};
-});
-
 vi.mock('../../src/runtime-state', () => {
 	return {
 		RuntimeStateStore: {
-			mutate: mocks.runtimeMutateMock,
-			read: vi.fn(() => ({ clients: {}, tunnel: { pid: 4242 } })),
+			mutate: vi.fn((mutator: (state: unknown) => unknown) => Promise.resolve(mutator({ tunnel: {} }))),
+			read: vi.fn(() => ({ clients: {} })),
 			hasLiveClients: vi.fn(() => true)
 		}
 	};
@@ -61,36 +49,8 @@ vi.mock('../../src/runtime-state', () => {
 
 import { TunnelManager } from '../../src/tunnel-manager';
 
-function createCallbacks() {
-	return {
-		isExtensionHostActive: () => true,
-		onStateChange: vi.fn(),
-		onLog: vi.fn(),
-		isLocalApiHealthy: vi.fn(() => Promise.resolve(true)),
-		onNeedsApiRecovery: vi.fn(),
-		onTunnelUrl: vi.fn()
-	};
-}
-
 describe('TunnelManager cloudflared binary path', () => {
 	const binDir = path.join(os.homedir(), '.ungate', 'bin');
-
-	beforeEach(() => {
-		mocks.tunnelQuickMock.mockReset();
-		mocks.tunnelQuickMock.mockReturnValue({
-			on: vi.fn(),
-			stop: vi.fn(),
-			process: { pid: 111 }
-		});
-		mocks.findCloudflaredPidsForPortMock.mockReturnValue([]);
-		mocks.isProcessAliveMock.mockReturnValue(false);
-		mocks.killProcessMock.mockReturnValue(false);
-		mocks.existsSyncMock.mockReset();
-		mocks.renameSyncMock.mockReset();
-		mocks.installMock.mockReset();
-		mocks.useMock.mockReset();
-		mocks.runtimeMutateMock.mockClear();
-	});
 
 	afterEach(() => {
 		vi.clearAllMocks();
@@ -106,7 +66,12 @@ describe('TunnelManager cloudflared binary path', () => {
 		mocks.existsSyncMock.mockReturnValue(false);
 		mocks.installMock.mockResolvedValue(expectedPath);
 
-		const manager = new TunnelManager('window-a', createCallbacks());
+		const manager = new TunnelManager(
+			'window-a',
+			() => true,
+			() => {},
+			() => {}
+		);
 
 		await manager.start(47821);
 
@@ -130,7 +95,12 @@ describe('TunnelManager cloudflared binary path', () => {
 			return value === legacyPath;
 		});
 
-		const manager = new TunnelManager('window-a', createCallbacks());
+		const manager = new TunnelManager(
+			'window-a',
+			() => true,
+			() => {},
+			() => {}
+		);
 
 		await manager.start(47821);
 
@@ -139,52 +109,5 @@ describe('TunnelManager cloudflared binary path', () => {
 		expect(mocks.renameSyncMock).toHaveBeenCalledWith(legacyPath, expectedPath);
 		expect(mocks.useMock).toHaveBeenCalledWith(expectedPath);
 		expect(mocks.installMock).not.toHaveBeenCalled();
-	});
-
-	it('kills stale cloudflared pids before starting', async () => {
-		mocks.existsSyncMock.mockReturnValue(true);
-		mocks.findCloudflaredPidsForPortMock.mockReturnValue([9001, 9002]);
-		mocks.isProcessAliveMock.mockReturnValue(true);
-		mocks.killProcessMock.mockReturnValue(true);
-
-		const callbacks = createCallbacks();
-		const manager = new TunnelManager('window-a', callbacks);
-
-		await manager.start(47821);
-
-		expect(mocks.findCloudflaredPidsForPortMock).toHaveBeenCalledWith(47821);
-		expect(mocks.killProcessMock).toHaveBeenCalledWith(4242, 'SIGINT');
-		expect(mocks.killProcessMock).toHaveBeenCalledWith(9001, 'SIGINT');
-		expect(mocks.killProcessMock).toHaveBeenCalledWith(9002, 'SIGINT');
-		expect(callbacks.onLog).toHaveBeenCalledWith(
-			expect.objectContaining({ message: expect.stringContaining('Killed stale cloudflared pid=') })
-		);
-	});
-
-	it('persists tunnel pid when url is ready', async () => {
-		mocks.existsSyncMock.mockReturnValue(true);
-
-		const handlers = new Map<string, (value?: unknown) => void>();
-		mocks.tunnelQuickMock.mockReturnValue({
-			on(event: string, handler: (value?: unknown) => void) {
-				handlers.set(event, handler);
-			},
-			stop: vi.fn(),
-			process: { pid: 5555 }
-		});
-
-		const callbacks = createCallbacks();
-		const manager = new TunnelManager('window-a', callbacks);
-
-		await manager.start(47821);
-		handlers.get('url')?.('https://example.trycloudflare.com');
-
-		expect(mocks.runtimeMutateMock).toHaveBeenCalled();
-		expect(callbacks.onTunnelUrl).toHaveBeenCalledWith('https://example.trycloudflare.com', null);
-		expect(manager.getState()).toEqual({
-			status: 'running',
-			url: 'https://example.trycloudflare.com',
-			error: null
-		});
 	});
 });

@@ -20,10 +20,7 @@ export async function startServer(): Promise<void> {
 	const config = getConfig(settings);
 	setQuietMode(config.quietMode);
 
-	// Fastify's default bodyLimit (1 MiB) rejects long-context prompts with 413:
-	// a 200k-token conversation is already ~1 MB of JSON and 1M-context models
-	// can send several times that. Upstream providers enforce their own limits.
-	const app = Fastify({ logger: false, bodyLimit: 64 * 1024 * 1024 });
+	const app = Fastify({ logger: false });
 	app.decorate('config', config);
 
 	await app.register(cors, { origin: '*' });

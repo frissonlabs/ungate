@@ -63,27 +63,16 @@ describe('CursorStateDbReader', () => {
 		expect(value).toBeNull();
 	});
 
-	it('writes ItemTable values with retries on sqlite busy', async () => {
+	it('caches init result', async () => {
 		mocks.resolveMock.mockResolvedValue('/usr/bin/sqlite3');
-		mocks.execFileMock
-			.mockImplementationOnce((_command: string, _args: string[], callback: (error: Error) => void) => {
-				callback(new Error('database is locked'));
-			})
-			.mockImplementationOnce(
-				(_command: string, _args: string[], callback: (error: null, result: { stdout: string }) => void) => {
-					callback(null, { stdout: '' });
-				}
-			);
 
 		const reader = new CursorStateDbReader();
-		await reader.init();
-		await reader.writeItemTableValue('/tmp/state.vscdb', 'cursorAuth/openAIKey', '{"useOpenAIKey":true}');
 
-		expect(mocks.execFileMock).toHaveBeenCalledTimes(2);
-		expect(mocks.execFileMock).toHaveBeenLastCalledWith(
-			'/usr/bin/sqlite3',
-			['/tmp/state.vscdb', "UPDATE ItemTable SET value = '{\"useOpenAIKey\":true}' WHERE key = 'cursorAuth/openAIKey';"],
-			expect.any(Function)
-		);
+		const firstInit = await reader.init();
+		const secondInit = await reader.init();
+
+		expect(firstInit).toBeNull();
+		expect(secondInit).toBeNull();
+		expect(mocks.resolveMock).toHaveBeenCalledTimes(1);
 	});
 });

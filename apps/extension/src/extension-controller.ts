@@ -4,7 +4,6 @@ import {
 	DEFAULT_KEY_FIX_ENABLED,
 	sleep,
 	type ApiStatus as ApiLifecycleStatus,
-	type LogEntry,
 	type RuntimeCommandAction,
 	type RuntimeState,
 	type TunnelState
@@ -19,7 +18,8 @@ import { OpenAiKeyFix } from './openai-key-fix';
 import { RuntimeStateStore } from './runtime-state';
 import { config } from './runtime-state/config';
 import { TunnelManager } from './tunnel-manager';
-import { CursorOpenAiBaseUrlWriter } from './utils/cursor-openai-base-url';
+
+import type { LogEntry } from './utils/log-ring-buffer';
 
 export class ExtensionController {
 	private outputChannel!: vscode.OutputChannel;
@@ -28,12 +28,9 @@ export class ExtensionController {
 	private tunnelManager!: TunnelManager;
 	private apiServer!: ApiServer;
 	private keyFix!: OpenAiKeyFix;
-	private baseUrlWriter!: CursorOpenAiBaseUrlWriter;
 	private currentPort: number | null = null;
 	private lastApiStatus: ApiLifecycleStatus | null = null;
 	private currentTunnelState: TunnelState = { status: 'stopped', url: null, error: null };
-	private tunnelDesired = false;
-	private recoveryInProgress = false;
 	private readonly windowId = `${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 	private heartbeatTimer: NodeJS.Timeout | null = null;
 	private syncTimer: NodeJS.Timeout | null = null;
@@ -69,35 +66,20 @@ export class ExtensionController {
 				return this.isLeaderWindow();
 			}
 		);
-		this.baseUrlWriter = new CursorOpenAiBaseUrlWriter(this.context.globalStorageUri.fsPath, (message) => {
-			this.log(`[openai-base-url] ${message}`);
-		});
 
-		this.tunnelManager = new TunnelManager(this.windowId, {
-			isExtensionHostActive: () => this.extensionHostActive,
-			onStateChange: (state) => {
+		this.tunnelManager = new TunnelManager(
+			this.windowId,
+			() => this.extensionHostActive,
+			(state) => {
 				this.currentTunnelState = state;
 				this.dashboard.sendTunnelState(state);
 				this.updateStatusBar();
 			},
-			onLog: (entry) => {
+			(entry) => {
 				this.log(`[tunnel] ${entry.message}`);
 				this.dashboard.pushLog('tunnel', entry);
-			},
-			isLocalApiHealthy: async () => {
-				return this.checkLocalApiHealth();
-			},
-			onNeedsApiRecovery: () => {
-				void this.recoverApiAndTunnel().catch((err: unknown) => {
-					this.log(`[recovery] failed: ${this.formatError(err)}`);
-				});
-			},
-			onTunnelUrl: (url, previousUrl) => {
-				void this.handleTunnelUrl(url, previousUrl).catch((err: unknown) => {
-					this.log(`[openai-base-url] update failed: ${this.formatError(err)}`);
-				});
 			}
-		});
+		);
 
 		this.apiServer = new ApiServer(this.context, {
 			onLog: (level: LogEntry['level'], message: string) => {
@@ -248,131 +230,24 @@ export class ExtensionController {
 			this.dashboard.setPort(port);
 		}
 
-		if (this.lastApiStatus === 'running' && this.tunnelDesired) {
+		if (this.lastApiStatus === 'running') {
 			const tunnelState = this.tunnelManager.getState();
 
-			if (tunnelState.status === 'running' || tunnelState.status === 'starting') {
+			if (tunnelState.status === 'running') {
 				void this.tunnelManager.restart(port).catch((err: unknown) => {
 					const message = this.formatError(err);
 					this.reportTunnelError(`[tunnel] restart failed after port update: ${message}`, `Restart failed: ${message}`);
-				});
-			} else if (tunnelState.status === 'stopped' || tunnelState.status === 'error') {
-				void this.tunnelManager.start(port).catch((err: unknown) => {
-					const message = this.formatError(err);
-					this.reportTunnelError(`[tunnel] start failed after port update: ${message}`, `Start failed: ${message}`);
 				});
 			}
 		}
 	}
 
 	private handleApiServerStatusChange(status: ApiLifecycleStatus): void {
-		const previous = this.lastApiStatus;
-
-		if (status === 'stopped' && previous === 'running') {
+		if (status === 'stopped' && this.lastApiStatus === 'running') {
 			this.log(`[health] port ${this.currentPort} unreachable`);
 		}
 
-		if ((status === 'error' || status === 'stopped') && previous === 'running' && this.tunnelDesired) {
-			this.log('[tunnel] stopping tunnel because API became unhealthy');
-			this.tunnelManager.stop();
-		}
-
 		this.applyApiServerStatus(status);
-
-		if (status === 'running' && previous !== 'running' && this.tunnelDesired && this.currentPort) {
-			const tunnelState = this.tunnelManager.getState();
-
-			if (tunnelState.status !== 'running' && tunnelState.status !== 'starting') {
-				this.log(`[tunnel] restarting tunnel after API recovery on port ${this.currentPort}`);
-				void this.tunnelManager.start(this.currentPort).catch((err: unknown) => {
-					const message = this.formatError(err);
-					this.reportTunnelError(`[tunnel] start failed after API recovery: ${message}`, `Start failed: ${message}`);
-				});
-			}
-		}
-	}
-
-	private async checkLocalApiHealth(): Promise<boolean> {
-		const port = this.currentPort ?? this.apiServer.getPort();
-
-		if (!port) {
-			return false;
-		}
-
-		try {
-			const response = await fetch(`http://localhost:${port}/health`, {
-				signal: AbortSignal.timeout(config.apiServer.portHealthRequestTimeoutMs)
-			});
-
-			return response.ok;
-		} catch {
-			return false;
-		}
-	}
-
-	private async recoverApiAndTunnel(): Promise<void> {
-		if (this.recoveryInProgress || !this.isLeaderWindow()) {
-			return;
-		}
-
-		this.recoveryInProgress = true;
-		this.log('[recovery] restarting API and tunnel after remote health failure');
-
-		try {
-			if (this.tunnelDesired) {
-				this.tunnelManager.stop();
-			}
-
-			await this.apiServer.restart();
-
-			if (this.tunnelDesired && this.currentPort) {
-				await this.tunnelManager.start(this.currentPort);
-			}
-		} finally {
-			this.recoveryInProgress = false;
-		}
-	}
-
-	private async handleTunnelUrl(url: string, previousUrl: string | null): Promise<void> {
-		const result = await this.baseUrlWriter.updateFromTunnelUrl(url, previousUrl);
-
-		if (result.status === 'updated') {
-			this.log(`[openai-base-url] updated Cursor OpenAI Base URL to ${result.next}`);
-			const apiUrl = `${url}/v1`;
-			const action = await vscode.window.showInformationMessage(
-				`Updated Cursor OpenAI Base URL to ${result.next}`,
-				'Copy URL',
-				'Reload Window'
-			);
-
-			if (action === 'Copy URL') {
-				await vscode.env.clipboard.writeText(apiUrl);
-			} else if (action === 'Reload Window') {
-				await vscode.commands.executeCommand('workbench.action.reloadWindow');
-			}
-
-			return;
-		}
-
-		if (result.status === 'failed') {
-			this.log(`[openai-base-url] failed: ${result.reason}`);
-			const apiUrl = `${url}/v1`;
-			const action = await vscode.window.showWarningMessage(
-				`Could not auto-update Cursor OpenAI Base URL (${result.reason}). New tunnel: ${apiUrl}`,
-				'Copy URL',
-				'Reload Window'
-			);
-
-			if (action === 'Copy URL') {
-				await vscode.env.clipboard.writeText(apiUrl);
-			} else if (action === 'Reload Window') {
-				await vscode.commands.executeCommand('workbench.action.reloadWindow');
-			}
-
-			return;
-		}
-
-		this.log(`[openai-base-url] skipped: ${result.reason}`);
 	}
 
 	private restartTunnelFromStatusBar(): void {
@@ -387,7 +262,6 @@ export class ExtensionController {
 
 		const port = runtimePort;
 
-		this.tunnelDesired = true;
 		this.log(`[tunnel] restart requested from status bar (port ${port})`);
 		this.enqueueCommand('restart-tunnel');
 	}
@@ -446,21 +320,18 @@ export class ExtensionController {
 		}
 
 		if (message.type === 'start-tunnel') {
-			this.tunnelDesired = true;
 			this.enqueueCommand('start-tunnel');
 
 			return;
 		}
 
 		if (message.type === 'stop-tunnel') {
-			this.tunnelDesired = false;
 			this.enqueueCommand('stop-tunnel');
 
 			return;
 		}
 
 		if (message.type === 'restart-tunnel') {
-			this.tunnelDesired = true;
 			this.enqueueCommand('restart-tunnel');
 
 			return;
@@ -501,8 +372,6 @@ export class ExtensionController {
 	}
 
 	private handleDashboardStartTunnel(): void {
-		this.tunnelDesired = true;
-
 		if (this.currentPort) {
 			this.log(`[tunnel] start requested on port ${this.currentPort}`);
 			void this.tunnelManager.start(this.currentPort).catch((err: unknown) => {
@@ -526,7 +395,6 @@ export class ExtensionController {
 			return;
 		}
 
-		this.tunnelDesired = true;
 		void this.tunnelManager.restart(this.currentPort).catch((err: unknown) => {
 			const message = this.formatError(err);
 			this.reportTunnelError(`[tunnel] restart failed: ${message}`, `Restart failed: ${message}`);
@@ -571,11 +439,6 @@ export class ExtensionController {
 	private async bootstrapRuntime(): Promise<void> {
 		await RuntimeStateStore.touchClient(this.windowId);
 		const runtimeState = await RuntimeStateStore.prepareApiForBootstrap();
-
-		if (runtimeState.tunnel.status === 'running' || runtimeState.tunnel.status === 'starting') {
-			this.tunnelDesired = true;
-		}
-
 		this.startApiAsLeaderIfNeeded(runtimeState);
 		await this.syncFromRuntimeState();
 	}
@@ -672,8 +535,6 @@ export class ExtensionController {
 		}
 
 		if (command.action === 'start-tunnel') {
-			this.tunnelDesired = true;
-
 			if (this.currentPort) {
 				void this.tunnelManager.start(this.currentPort).catch((err: unknown) => {
 					const message = this.formatError(err);
@@ -687,7 +548,6 @@ export class ExtensionController {
 		}
 
 		if (command.action === 'stop-tunnel') {
-			this.tunnelDesired = false;
 			this.tunnelManager.stop();
 			this.ackCommand(command.id);
 
@@ -695,7 +555,6 @@ export class ExtensionController {
 		}
 
 		if (command.action === 'restart-tunnel') {
-			this.tunnelDesired = true;
 			const commandPort = command.payload?.port ?? this.currentPort;
 			if (commandPort) {
 				void this.tunnelManager.restart(commandPort).catch((err: unknown) => {

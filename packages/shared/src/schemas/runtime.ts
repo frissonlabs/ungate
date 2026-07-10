@@ -33,7 +33,6 @@ export const runtimeApiStateSchema = z.object({
 });
 
 export const runtimeTunnelStateSchema = z.object({
-	pid: z.number().nullable().default(null),
 	status: runtimeTunnelStatusSchema,
 	url: z.string().nullable(),
 	lastSeenAt: z.number(),

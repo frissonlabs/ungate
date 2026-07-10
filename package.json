@@ -12,8 +12,7 @@
 		"package:build": "bash scripts/build-package/run.sh",
 		"lint:fix": "pnpm -r --parallel run lint:fix",
 		"test": "pnpm --filter ungate test && pnpm --filter @ungate/api test",
-		"prepare": "husky",
-		"install": "cursor --install-extension \"apps/extension/out/ungate.vsix\""
+		"prepare": "husky"
 	},
 	"devDependencies": {
 		"@ungate/dev-kit": "workspace:*",

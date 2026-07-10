@@ -19,7 +19,6 @@ export class TestHelper {
 				startSuppressed: false
 			},
 			tunnel: {
-				pid: null,
 				status: 'stopped',
 				url: null,
 				lastError: null,

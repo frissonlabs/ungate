@@ -14,13 +14,6 @@ interface StreamHandlerOptions {
 	context: RequestContext;
 }
 
-// Cloudflare's edge (and Cursor's client) abort streams that go silent for too
-// long (~100s). Adaptive-thinking models emit thinking/signature deltas and
-// pings that we don't forward, so long reasoning stretches produce zero
-// downstream bytes. Emitting an SSE comment (ignored by all SSE parsers) after
-// this much silence keeps the connection alive.
-const KEEPALIVE_INTERVAL_MS = 10_000;
-
 export class OpenAIStreamHandler {
 	static createStreamResponse(response: Response, streamId: string, modelName: string, context: RequestContext): StreamResult {
 		const headers: Record<string, string> = {
@@ -47,14 +40,6 @@ export class OpenAIStreamHandler {
 		const { reader, streamId, modelName, context } = options;
 
 		let cancelled = false;
-		let keepaliveTimer: NodeJS.Timeout | null = null;
-
-		const stopKeepalive = () => {
-			if (keepaliveTimer) {
-				clearInterval(keepaliveTimer);
-				keepaliveTimer = null;
-			}
-		};
 
 		return new ReadableStream({
 			async start(controller) {
@@ -75,30 +60,15 @@ export class OpenAIStreamHandler {
 					cache_creation_input_tokens: number;
 				} | null = null;
 
-				let lastEnqueueAt = Date.now();
-
 				const safeEnqueue = (data: Uint8Array) => {
 					try {
 						if (!cancelled) {
 							controller.enqueue(data);
-							lastEnqueueAt = Date.now();
 						}
 					} catch {
 						cancelled = true;
 					}
 				};
-
-				keepaliveTimer = setInterval(() => {
-					if (cancelled) {
-						stopKeepalive();
-
-						return;
-					}
-
-					if (Date.now() - lastEnqueueAt >= KEEPALIVE_INTERVAL_MS) {
-						safeEnqueue(new TextEncoder().encode(': keepalive\n\n'));
-					}
-				}, KEEPALIVE_INTERVAL_MS);
 
 				try {
 					while (true) {
@@ -283,8 +253,6 @@ export class OpenAIStreamHandler {
 						}
 					}
 				} finally {
-					stopKeepalive();
-
 					try {
 						if (!cancelled) reader.cancel().catch(() => {});
 					} catch {
@@ -300,7 +268,6 @@ export class OpenAIStreamHandler {
 			},
 			cancel(reason) {
 				cancelled = true;
-				stopKeepalive();
 				reader.cancel(reason).catch(() => {});
 			}
 		});

@@ -13,9 +13,7 @@ const {
 	sleepMock,
 	ensureInstalledMock,
 	spawnSyncMock,
-	spawnMock,
-	isProcessAliveMock,
-	killProcessMock
+	spawnMock
 } = vi.hoisted(() => {
 	const runtimeReadMock = vi.fn<() => RuntimeState>();
 	const runtimeHasLiveClientsMock = vi.fn<(state: RuntimeState) => boolean>();
@@ -41,8 +39,6 @@ const {
 
 		return child;
 	});
-	const isProcessAliveMock = vi.fn<(pid: number | null | undefined) => boolean>(() => false);
-	const killProcessMock = vi.fn<(pid: number, signal?: NodeJS.Signals) => boolean>(() => true);
 
 	return {
 		runtimeReadMock,
@@ -51,9 +47,7 @@ const {
 		sleepMock,
 		ensureInstalledMock,
 		spawnSyncMock,
-		spawnMock,
-		isProcessAliveMock,
-		killProcessMock
+		spawnMock
 	};
 });
 
@@ -75,14 +69,6 @@ vi.mock('../../src/utils/better-sqlite3-installer', () => {
 				() => '/tmp/ungate-extension/bundled/api/node_modules/better-sqlite3/build/Release/better_sqlite3.installed.node'
 			)
 		}
-	};
-});
-
-vi.mock('../../src/utils/cloudflared-process', () => {
-	return {
-		isProcessAlive: isProcessAliveMock,
-		killProcess: killProcessMock,
-		findCloudflaredPidsForPort: vi.fn(() => [])
 	};
 });
 
@@ -120,19 +106,14 @@ vi.mock('../../src/runtime-state', () => {
 
 interface ApiServerInternals {
 	port: number | null;
-	process: { kill: ReturnType<typeof vi.fn>; pid?: number } | null;
+	process: null;
 	lastStatus: 'starting' | 'running' | 'stopped' | 'error' | null;
 	restartRequested: boolean;
 	restartInProgress: boolean;
 	shutDownDeliberately: boolean;
 	startPromise: Promise<void> | null;
-	addressInUsePort: number | null;
-	consecutiveHealthFailures: number;
-	lastHungRestartAt: number;
-	hungRestartInProgress: boolean;
 	runHealthCheckCycle(): Promise<void>;
 	onExit(code: number | null, signal: NodeJS.Signals | null): void;
-	onStderr(data: Buffer): void;
 	spawn(): void;
 	ensureNativeDeps(): Promise<void>;
 	checkPortHealth(port: number): Promise<boolean>;
@@ -226,10 +207,6 @@ describe('ApiServer.runHealthCheckCycle', () => {
 		ensureInstalledMock.mockResolvedValue(undefined);
 		vi.unstubAllGlobals();
 		vi.useRealTimers();
-		isProcessAliveMock.mockReset();
-		isProcessAliveMock.mockReturnValue(false);
-		killProcessMock.mockReset();
-		killProcessMock.mockReturnValue(true);
 	});
 
 	it('does not mark attached running api as stopped after a transient health-check failure', async () => {
@@ -637,70 +614,5 @@ describe('ApiServer.onExit', () => {
 		expect(onPortDetected).toHaveBeenCalledWith(47821);
 		expect(onStatusChange).toHaveBeenCalledWith('running');
 		expect(onStatusChange).not.toHaveBeenCalledWith('error');
-	});
-
-	it('detects the port from the first EADDRINUSE stderr chunk before the serialized error object arrives', async () => {
-		const { server, onPortDetected, onStatusChange } = createServer();
-		const internals = getInternals(server);
-		runtimeMutateMock.mockImplementation((mutator) => {
-			const nextState = mutator(structuredClone(createRuntimeState()));
-
-			return Promise.resolve(nextState);
-		});
-		vi.spyOn(internals, 'checkPortHealth').mockResolvedValue(true);
-		vi.spyOn(internals, 'startHealthCheck').mockImplementation(() => {});
-
-		Object.assign(internals, {
-			addressInUsePort: null,
-			process: null,
-			restartRequested: false,
-			shutDownDeliberately: false
-		});
-
-		internals.onStderr(Buffer.from('Error: listen EADDRINUSE: address already in use 0.0.0.0:47821\n'));
-		expect(internals.addressInUsePort).toBe(47821);
-
-		internals.onExit(1, null);
-		await flushPromises();
-
-		expect(onPortDetected).toHaveBeenCalledWith(47821);
-		expect(onStatusChange).toHaveBeenCalledWith('running');
-		expect(onStatusChange).not.toHaveBeenCalledWith('error');
-	});
-
-	it('kills a hung api process and restarts after repeated health failures', async () => {
-		const runtimeState = createRuntimeState();
-		const { server, onStatusChange, onLog } = createServer();
-		const internals = getInternals(server);
-		const child = { pid: 4242, kill: vi.fn() };
-
-		runtimeReadMock.mockReturnValue(runtimeState);
-		runtimeHasLiveClientsMock.mockReturnValue(true);
-		runtimeMutateMock.mockImplementation((mutator) => Promise.resolve(mutator(structuredClone(runtimeState))));
-		isProcessAliveMock.mockReturnValue(true);
-		vi.stubGlobal(
-			'fetch',
-			vi.fn(() => Promise.reject(new Error('connection refused')))
-		);
-
-		Object.assign(internals, {
-			port: 4783,
-			lastStatus: 'running',
-			process: child,
-			consecutiveHealthFailures: 0,
-			lastHungRestartAt: 0,
-			hungRestartInProgress: false
-		});
-
-		await internals.runHealthCheckCycle();
-		expect(child.kill).not.toHaveBeenCalled();
-		expect(onStatusChange).toHaveBeenCalledWith('error');
-
-		await internals.runHealthCheckCycle();
-
-		expect(resetApiForRestartMock).toHaveBeenCalled();
-		expect(child.kill).toHaveBeenCalled();
-		expect(internals.restartRequested).toBe(true);
-		expect(onLog).toHaveBeenCalledWith('warn', expect.stringContaining('recovering hung api'));
 	});
 });
