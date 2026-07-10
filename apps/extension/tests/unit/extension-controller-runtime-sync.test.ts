@@ -16,6 +16,9 @@ interface MockApiServer {
 
 interface MockTunnelManager {
 	stop: ReturnType<typeof vi.fn>;
+	start: ReturnType<typeof vi.fn>;
+	restart: ReturnType<typeof vi.fn>;
+	getState: ReturnType<typeof vi.fn>;
 }
 
 interface MockDashboard {
@@ -28,9 +31,12 @@ interface MockDashboard {
 
 interface ExtensionControllerInternals {
 	currentPort: number | null;
+	tunnelDesired: boolean;
+	lastApiStatus: 'starting' | 'running' | 'stopped' | 'error' | null;
 	bootstrapRuntime(): Promise<void>;
 	syncFromRuntimeState(): Promise<void>;
 	startApiAsLeaderIfNeeded(runtimeState: RuntimeState): void;
+	handleApiServerStatusChange(status: 'starting' | 'running' | 'stopped' | 'error'): void;
 }
 
 const createOutputChannelMock = vi.fn(() => {
@@ -158,6 +164,17 @@ vi.mock('../../src/tunnel-manager', () => {
 	return {
 		TunnelManager: class {
 			stop = vi.fn();
+			start = vi.fn().mockResolvedValue(undefined);
+			restart = vi.fn().mockResolvedValue(undefined);
+			getState = vi.fn(() => ({ status: 'stopped', url: null, error: null }));
+		}
+	};
+});
+
+vi.mock('../../src/utils/cursor-openai-base-url', () => {
+	return {
+		CursorOpenAiBaseUrlWriter: class {
+			updateFromTunnelUrl = vi.fn(() => Promise.resolve({ status: 'skipped', reason: 'test' }));
 		}
 	};
 });
@@ -186,7 +203,8 @@ function createRuntimeState(windowIds: string[], apiPort: number | null = 4783):
 function createContext() {
 	return {
 		subscriptions: [],
-		extensionPath: '/tmp/ungate-extension'
+		extensionPath: '/tmp/ungate-extension',
+		globalStorageUri: { fsPath: '/tmp/ungate-extension/globalStorage/orchidfiles.ungate' }
 	};
 }
 
@@ -207,7 +225,10 @@ function createController(windowId: string): {
 		syncLeaderHealthMonitor: vi.fn()
 	};
 	const tunnelManager: MockTunnelManager = {
-		stop: vi.fn()
+		stop: vi.fn(),
+		start: vi.fn().mockResolvedValue(undefined),
+		restart: vi.fn().mockResolvedValue(undefined),
+		getState: vi.fn(() => ({ status: 'stopped', url: null, error: null }))
 	};
 	const dashboard: MockDashboard = {
 		setPort: vi.fn(),
@@ -237,6 +258,10 @@ function createController(windowId: string): {
 		tunnelManager,
 		dashboard,
 		statusBar,
+		outputChannel: {
+			appendLine: vi.fn(),
+			dispose: vi.fn()
+		},
 		keyFix: {
 			isEnabled() {
 				return keyFixEnabled;
@@ -247,6 +272,7 @@ function createController(windowId: string): {
 		currentTunnelState,
 		currentPort: null,
 		lastApiStatus: null,
+		tunnelDesired: false,
 		extensionHostActive: true,
 		heartbeatTimer: null,
 		syncTimer: null
@@ -528,5 +554,66 @@ describe('ExtensionController', () => {
 
 		expect(dashboard.setPort).toHaveBeenCalledWith(4783);
 		expect(internals.currentPort).toBe(4783);
+	});
+
+	it('stops a desired tunnel when API becomes unhealthy', () => {
+		const { controller, tunnelManager } = createController('window-a');
+		const internals = getInternals(controller);
+
+		internals.tunnelDesired = true;
+		internals.lastApiStatus = 'running';
+		internals.currentPort = 47821;
+		tunnelManager.getState.mockReturnValue({ status: 'running', url: 'https://x.trycloudflare.com', error: null });
+
+		internals.handleApiServerStatusChange('error');
+
+		expect(tunnelManager.stop).toHaveBeenCalledTimes(1);
+		expect(internals.lastApiStatus).toBe('error');
+	});
+
+	it('restarts a desired tunnel when API recovers', async () => {
+		const { controller, tunnelManager } = createController('window-a');
+		const internals = getInternals(controller);
+
+		internals.tunnelDesired = true;
+		internals.lastApiStatus = 'error';
+		internals.currentPort = 47821;
+		tunnelManager.getState.mockReturnValue({ status: 'stopped', url: null, error: null });
+
+		internals.handleApiServerStatusChange('running');
+		await Promise.resolve();
+
+		expect(tunnelManager.start).toHaveBeenCalledWith(47821);
+	});
+
+	it('does not start a tunnel on API recovery when tunnel is not desired', async () => {
+		const { controller, tunnelManager } = createController('window-a');
+		const internals = getInternals(controller);
+
+		internals.tunnelDesired = false;
+		internals.lastApiStatus = 'error';
+		internals.currentPort = 47821;
+
+		internals.handleApiServerStatusChange('running');
+		await Promise.resolve();
+
+		expect(tunnelManager.start).not.toHaveBeenCalled();
+		expect(tunnelManager.stop).not.toHaveBeenCalled();
+	});
+
+	it('marks tunnel desired from bootstrap when disk says tunnel was running', async () => {
+		const { controller } = createController('window-a');
+		const internals = getInternals(controller);
+		const runtimeState = createRuntimeState(['window-a'], 47821);
+		runtimeState.tunnel.status = 'running';
+		runtimeState.tunnel.url = 'https://old.trycloudflare.com';
+		runtimeReadMock.mockReturnValue(runtimeState);
+		runtimeGetLiveClientIdsMock.mockReturnValue(['window-a']);
+		runtimeTouchClientMock.mockResolvedValue(runtimeState);
+		runtimeGetLeaderWindowIdMock.mockReturnValue('window-a');
+
+		await internals.bootstrapRuntime();
+
+		expect(internals.tunnelDesired).toBe(true);
 	});
 });

@@ -97,6 +97,64 @@ describe('streaming-openai-stream-handler', () => {
 		expect(output).toContain('data: [DONE]');
 	});
 
+	it('emits SSE keepalive comments while upstream is silent (e.g. during thinking)', async () => {
+		vi.useFakeTimers();
+
+		try {
+			let upstream!: ReadableStreamDefaultController<Uint8Array>;
+			const response = new Response(
+				new ReadableStream<Uint8Array>({
+					start(controller) {
+						upstream = controller;
+					}
+				})
+			);
+
+			const { stream } = OpenAIStreamHandler.createStreamResponse(response, 'st4', 'model4', {
+				model: 'model4',
+				source: 'claude',
+				startTime: Date.now(),
+				reverseToolMapping: {}
+			});
+
+			const reader = stream.getReader();
+			const decoder = new TextDecoder();
+			let output = '';
+			const drain = (async () => {
+				while (true) {
+					const { done, value } = await reader.read();
+					if (done) break;
+					output += decoder.decode(value, { stream: true });
+				}
+			})();
+
+			const encoder = new TextEncoder();
+			upstream.enqueue(
+				encoder.encode('data: {"type":"message_start","message":{"usage":{"input_tokens":1,"output_tokens":0}}}\n')
+			);
+
+			// Simulate a long thinking pause: no upstream events for 35s.
+			await vi.advanceTimersByTimeAsync(35_000);
+
+			upstream.enqueue(
+				encoder.encode(
+					'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"done thinking"}}\n' +
+						'data: {"type":"message_stop"}\n'
+				)
+			);
+			upstream.close();
+
+			await drain;
+
+			const keepalives = output.match(/: keepalive\n\n/g) ?? [];
+			expect(keepalives.length).toBeGreaterThanOrEqual(3);
+			expect(output).toContain('"content":"done thinking"');
+			expect(output).toContain('data: [DONE]');
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
 	it('throws when upstream response has no body', () => {
 		expect(() =>
 			OpenAIStreamHandler.createStreamResponse(new Response(null), 'st3', 'model3', {

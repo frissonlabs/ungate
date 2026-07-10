@@ -34,6 +34,7 @@ function createState(apiStatus: RuntimeState['api']['status'], lastError: string
 			startSuppressed: true
 		},
 		tunnel: {
+			pid: null,
 			status: 'stopped',
 			url: null,
 			lastSeenAt: 0,
