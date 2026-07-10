@@ -28,11 +28,21 @@ export const config = {
 		// Request timeout for periodic API health checks.
 		healthCheckRequestTimeoutMs: 2000,
 		// Request timeout used when validating an existing API port.
-		portHealthRequestTimeoutMs: 1500
+		portHealthRequestTimeoutMs: 1500,
+		// Consecutive /health failures before killing a hung API process and restarting.
+		healthFailureRestartThreshold: 2,
+		// Minimum time between hung-API auto-restarts.
+		hungProcessRestartCooldownMs: 5000
 	},
 	tunnelManager: {
 		// Interval for checking if tunnel should auto-stop without live windows.
-		autoStopCheckIntervalMs: 1500
+		autoStopCheckIntervalMs: 1500,
+		// Interval for probing the public tunnel URL /health.
+		remoteHealthCheckIntervalMs: 5000,
+		// Request timeout for remote tunnel /health probes.
+		remoteHealthRequestTimeoutMs: 3000,
+		// Consecutive remote /health failures before refreshing the tunnel.
+		remoteHealthFailureThreshold: 3
 	},
 	extensionController: {
 		// Interval between heartbeat updates from the current window.

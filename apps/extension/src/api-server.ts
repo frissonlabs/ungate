@@ -8,6 +8,7 @@ import * as vscode from 'vscode';
 import { RuntimeStateStore } from './runtime-state';
 import { config } from './runtime-state/config';
 import { BetterSqlite3Installer } from './utils/better-sqlite3-installer';
+import { isProcessAlive, killProcess } from './utils/cloudflared-process';
 import { NodeResolver } from './utils/node-resolver';
 
 const HEALTH_CHECK_URL = (port: number) => `http://localhost:${port}/health`;
@@ -26,6 +27,7 @@ export class ApiServer {
 	private process: cp.ChildProcess | null = null;
 	private healthCheckTimer: NodeJS.Timeout | null = null;
 	private stdoutBuffer = '';
+	private stderrBuffer = '';
 	private restartRequested = false;
 	private shutDownDeliberately = false;
 	private lastStatus: ServerStatus | null = null;
@@ -35,6 +37,9 @@ export class ApiServer {
 	private addressInUsePort: number | null = null;
 	private startPromise: Promise<void> | null = null;
 	private restartInProgress = false;
+	private consecutiveHealthFailures = 0;
+	private lastHungRestartAt = 0;
+	private hungRestartInProgress = false;
 
 	constructor(
 		private readonly context: vscode.ExtensionContext,
@@ -188,6 +193,7 @@ export class ApiServer {
 
 		const cwd = this.getServerCwd();
 		this.stdoutBuffer = '';
+		this.stderrBuffer = '';
 
 		const isDev = this.context.extensionMode === vscode.ExtensionMode.Development;
 		const runtime = this.runtimePath || this.resolveRuntimePath(NodeResolver.resolve(process.env.UNGATE_NODE_BIN));
@@ -239,17 +245,25 @@ export class ApiServer {
 
 	private onStderr(data: Buffer): void {
 		const text = data.toString();
+		this.stderrBuffer += text;
 
 		for (const line of text.split('\n').filter((l) => l.trim())) {
-			if (line.includes('EADDRINUSE')) {
-				const match = /port:\s*(\d+)/.exec(this.stdoutBuffer + text);
-
-				if (match) {
-					this.addressInUsePort = parseInt(match[1], 10);
-				}
+			if (this.stderrBuffer.includes('EADDRINUSE')) {
+				this.captureAddressInUsePort(line);
 			}
 
 			this.callbacks.onLog('error', line);
+		}
+	}
+
+	private captureAddressInUsePort(line: string): void {
+		const match =
+			/port:\s*(\d+)/.exec(this.stderrBuffer) ??
+			/0\.0\.0\.0:(\d+)/.exec(line) ??
+			/address already in use [\d.]+:(\d+)/.exec(line);
+
+		if (match) {
+			this.addressInUsePort = parseInt(match[1], 10);
 		}
 	}
 
@@ -396,6 +410,7 @@ export class ApiServer {
 
 			if (res.ok) {
 				const wasDown = this.lastStatus !== 'running';
+				this.consecutiveHealthFailures = 0;
 
 				await this.setStatus('running');
 
@@ -403,10 +418,74 @@ export class ApiServer {
 					this.callbacks.onPortDetected(this.port);
 				}
 			} else {
-				await this.recordApiFailure(`[process] health check failed with status ${res.status}`);
+				await this.handleHealthFailure(`[process] health check failed with status ${res.status}`);
 			}
 		} catch {
-			await this.recordApiFailure('[process] health check failed');
+			await this.handleHealthFailure('[process] health check failed');
+		}
+	}
+
+	private async handleHealthFailure(message: string): Promise<void> {
+		this.consecutiveHealthFailures += 1;
+		this.callbacks.onLog('error', message);
+
+		const runtimePid = RuntimeStateStore.read().api.pid;
+		const pid = this.process?.pid ?? runtimePid;
+		const processAlive = this.process !== null || isProcessAlive(pid);
+
+		if (
+			processAlive &&
+			this.consecutiveHealthFailures >= config.apiServer.healthFailureRestartThreshold &&
+			!this.hungRestartInProgress &&
+			Date.now() - this.lastHungRestartAt >= config.apiServer.hungProcessRestartCooldownMs
+		) {
+			await this.recoverHungApi(message, pid);
+
+			return;
+		}
+
+		if (!processAlive) {
+			await this.recordApiFailure(message);
+
+			return;
+		}
+
+		this.lastStatus = 'error';
+		await this.writeRuntimeState('error', message);
+		this.callbacks.onStatusChange('error');
+	}
+
+	private async recoverHungApi(message: string, pid: number | null | undefined): Promise<void> {
+		this.hungRestartInProgress = true;
+		this.lastHungRestartAt = Date.now();
+		this.consecutiveHealthFailures = 0;
+		this.callbacks.onLog('warn', `[process] recovering hung api after health failures: ${message}`);
+
+		try {
+			if (this.process) {
+				this.restartInProgress = true;
+				this.port = null;
+				await RuntimeStateStore.resetApiForRestart();
+				this.restartRequested = true;
+				this.lastStatus = 'stopped';
+				this.callbacks.onStatusChange('stopped');
+				this.process.kill();
+
+				return;
+			}
+
+			if (pid && isProcessAlive(pid)) {
+				killProcess(pid, 'SIGTERM');
+			}
+
+			await RuntimeStateStore.resetApiForRestart();
+			this.port = null;
+			this.lastStatus = 'stopped';
+			this.callbacks.onStatusChange('stopped');
+			await sleep(config.apiServer.restartDelayMs);
+			await this.start();
+		} finally {
+			this.hungRestartInProgress = false;
 		}
 	}
 
@@ -425,7 +504,8 @@ export class ApiServer {
 
 	private async writeRuntimeState(status: ServerStatus, errorMessage: string | null): Promise<void> {
 		await RuntimeStateStore.mutate((current) => {
-			if (current.api.status === 'error' && status !== 'error' && status !== 'stopped') {
+			// Allow recovery from error → running after a successful health check / restart.
+			if (current.api.status === 'error' && status !== 'error' && status !== 'stopped' && status !== 'running') {
 				return current;
 			}
 
@@ -441,6 +521,10 @@ export class ApiServer {
 			current.api.status = status;
 			current.api.lastSeenAt = now;
 			current.api.lastError = errorMessage;
+
+			if (status === 'running' || status === 'starting') {
+				current.api.startSuppressed = false;
+			}
 
 			if (status === 'starting') {
 				current.api.ownerWindowId = this.callbacks.getWindowId();

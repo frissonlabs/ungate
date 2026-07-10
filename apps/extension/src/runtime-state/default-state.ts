@@ -15,6 +15,7 @@ export class RuntimeStateDefaults {
 				startSuppressed: false
 			},
 			tunnel: {
+				pid: null,
 				status: 'stopped',
 				url: null,
 				lastSeenAt: now,
