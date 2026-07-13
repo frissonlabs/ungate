@@ -1,2 +1,14 @@
+#!/usr/bin/env sh
+
+# #region agent log
+DEBUG_LOG="/Users/frissonlabs/Projects/ungate/.cursor/debug-b77aae.log"
+_log() {
+  printf '%s\n' "{\"sessionId\":\"b77aae\",\"timestamp\":$(date +%s000),\"location\":\"pre-commit\",\"hypothesisId\":\"$1\",\"message\":\"$2\",\"data\":$3}" >> "$DEBUG_LOG"
+}
+_log "A" "hook PATH at start" "{\"PATH\":\"$(printf '%s' "$PATH" | sed 's/\\/\\\\/g; s/"/\\"/g')\",\"HOME\":\"$HOME\"}"
+_log "B" "pnpm resolution checks" "{\"command_v_pnpm\":\"$(command -v pnpm || echo MISSING)\",\"homebrew_pnpm\":\"$([ -x /opt/homebrew/bin/pnpm ] && echo exists || echo missing)\",\"usr_local_pnpm\":\"$([ -x /usr/local/bin/pnpm ] && echo exists || echo missing)\",\"nm_bin_pnpm\":\"$([ -x node_modules/.bin/pnpm ] && echo exists || echo missing)\",\"corepack\":\"$(command -v corepack || echo MISSING)\",\"node\":\"$(command -v node || echo MISSING)\"}"
+_log "C" "husky init presence" "{\"husky_init\":\"$([ -f "${XDG_CONFIG_HOME:-$HOME/.config}/husky/init.sh" ] && echo exists || echo missing)\",\"huskyrc\":\"$([ -f "$HOME/.huskyrc" ] && echo exists || echo missing)\"}"
+# #endregion
+
 pnpm exec lint-staged
 pnpm test

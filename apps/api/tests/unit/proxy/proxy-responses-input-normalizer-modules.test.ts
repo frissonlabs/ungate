@@ -20,6 +20,13 @@ describe('proxy-responses-input-normalizer-modules', () => {
 			model: 'gpt-5.5',
 			reasoningEffort: 'xhigh'
 		});
+		expect(ResponsesModelResolver.resolveModel('gpt-5.6-luna')).toEqual({
+			model: 'gpt-5.6-luna'
+		});
+		expect(ResponsesModelResolver.resolveModel('gpt-5.6-luna-max')).toEqual({
+			model: 'gpt-5.6-luna',
+			reasoningEffort: 'max'
+		});
 	});
 
 	it('maps function tool_choice and keeps passthrough object', () => {

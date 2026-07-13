@@ -22,7 +22,14 @@ const MODEL_PRICING: Record<string, ModelPricing> = {
 
 	'claude-3-opus': { inputPerMTok: 15.0, outputPerMTok: 75.0 },
 	'claude-3-sonnet': { inputPerMTok: 3.0, outputPerMTok: 15.0 },
-	'claude-3-haiku': { inputPerMTok: 0.25, outputPerMTok: 1.25 }
+	'claude-3-haiku': { inputPerMTok: 0.25, outputPerMTok: 1.25 },
+
+	'gpt-5.6-sol': { inputPerMTok: 5.0, outputPerMTok: 30.0 },
+	'gpt-5.6-terra': { inputPerMTok: 2.5, outputPerMTok: 15.0 },
+	'gpt-5.6-luna': { inputPerMTok: 1.0, outputPerMTok: 6.0 },
+	'gpt-5.6': { inputPerMTok: 5.0, outputPerMTok: 30.0 },
+	'gpt-5.5': { inputPerMTok: 5.0, outputPerMTok: 30.0 },
+	'gpt-5.4': { inputPerMTok: 5.0, outputPerMTok: 30.0 }
 };
 
 const DEFAULT_PRICING: ModelPricing = { inputPerMTok: 3.0, outputPerMTok: 15.0 };

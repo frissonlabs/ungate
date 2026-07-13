@@ -86,16 +86,19 @@ interface OpenAiKeyFixInternals {
 async function createLeaderKeyFix(windowIds: string[] = ['window-a']): Promise<{
 	keyFix: OpenAiKeyFix;
 	internals: OpenAiKeyFixInternals;
+	onKeyToggled: ReturnType<typeof vi.fn>;
 }> {
 	const runtimeState = TestHelper.createRuntimeState(windowIds, null);
 	runtimeState.keyFix.enabled = true;
 	runtimeReadMock.mockReturnValue(runtimeState);
 
+	const onKeyToggled = vi.fn();
 	const keyFix = new OpenAiKeyFix(
 		{ globalStorageUri: { fsPath: '/tmp/global-storage/ungate' } } as never,
 		() => {},
 		() => {},
-		() => true
+		() => true,
+		onKeyToggled
 	);
 	const internals = keyFix as unknown as OpenAiKeyFixInternals;
 
@@ -103,7 +106,7 @@ async function createLeaderKeyFix(windowIds: string[] = ['window-a']): Promise<{
 	internals.state.enabled = true;
 	await keyFix.activate();
 
-	return { keyFix, internals };
+	return { keyFix, internals, onKeyToggled };
 }
 
 describe('OpenAiKeyFix', () => {
@@ -177,6 +180,16 @@ describe('OpenAiKeyFix', () => {
 		await internals.checkAndFix();
 
 		expect(executeCommandMock).toHaveBeenCalledWith('aiSettings.usingOpenAIKey.toggle');
+	});
+
+	it('notifies onKeyToggled after toggling the Cursor key', async () => {
+		const { internals, onKeyToggled } = await createLeaderKeyFix();
+
+		vi.spyOn(internals, 'readUseOpenAiKey').mockResolvedValue(false);
+		await internals.checkAndFix();
+
+		expect(executeCommandMock).toHaveBeenCalledWith('aiSettings.usingOpenAIKey.toggle');
+		expect(onKeyToggled).toHaveBeenCalledTimes(1);
 	});
 
 	it('does not start monitoring when the window is not the leader', () => {

@@ -33,10 +33,12 @@ interface ExtensionControllerInternals {
 	currentPort: number | null;
 	tunnelDesired: boolean;
 	lastApiStatus: 'starting' | 'running' | 'stopped' | 'error' | null;
+	currentTunnelState: TunnelState;
 	bootstrapRuntime(): Promise<void>;
 	syncFromRuntimeState(): Promise<void>;
 	startApiAsLeaderIfNeeded(runtimeState: RuntimeState): void;
 	handleApiServerStatusChange(status: 'starting' | 'running' | 'stopped' | 'error'): void;
+	reconcileBaseUrl(): Promise<void>;
 }
 
 const createOutputChannelMock = vi.fn(() => {
@@ -171,10 +173,13 @@ vi.mock('../../src/tunnel-manager', () => {
 	};
 });
 
+const baseUrlEnsureMock = vi.fn(() => Promise.resolve({ status: 'skipped', reason: 'test' }));
+
 vi.mock('../../src/utils/cursor-openai-base-url', () => {
 	return {
 		CursorOpenAiBaseUrlWriter: class {
 			updateFromTunnelUrl = vi.fn(() => Promise.resolve({ status: 'skipped', reason: 'test' }));
+			ensureBaseUrl = baseUrlEnsureMock;
 		}
 	};
 });
@@ -269,6 +274,10 @@ function createController(windowId: string): {
 			applySharedState: applySharedStateMock,
 			stop() {}
 		},
+		baseUrlWriter: {
+			updateFromTunnelUrl: vi.fn(() => Promise.resolve({ status: 'skipped', reason: 'test' })),
+			ensureBaseUrl: baseUrlEnsureMock
+		},
 		currentTunnelState,
 		currentPort: null,
 		lastApiStatus: null,
@@ -323,6 +332,8 @@ describe('ExtensionController', () => {
 		apiServerSyncLeaderHealthMonitorMock.mockClear();
 		apiServerGetPortMock.mockReturnValue(null);
 		apiServerStartMock.mockResolvedValue(undefined);
+		baseUrlEnsureMock.mockReset();
+		baseUrlEnsureMock.mockResolvedValue({ status: 'skipped', reason: 'test' });
 	});
 
 	it('starts the api on activate bootstrap when leader has no port', async () => {
@@ -599,6 +610,48 @@ describe('ExtensionController', () => {
 
 		expect(tunnelManager.start).not.toHaveBeenCalled();
 		expect(tunnelManager.stop).not.toHaveBeenCalled();
+	});
+
+	it('re-asserts the base url while the tunnel is running on the leader window', async () => {
+		const { controller } = createController('window-a');
+		const internals = getInternals(controller);
+		const runtimeState = createRuntimeState(['window-a'], 47821);
+		runtimeReadMock.mockReturnValue(runtimeState);
+		runtimeGetLeaderWindowIdMock.mockReturnValue('window-a');
+
+		internals.currentTunnelState = { status: 'running', url: 'https://live.trycloudflare.com', error: null };
+
+		await internals.reconcileBaseUrl();
+
+		expect(baseUrlEnsureMock).toHaveBeenCalledWith('https://live.trycloudflare.com/v1');
+	});
+
+	it('does not reconcile the base url when the tunnel is not running', async () => {
+		const { controller } = createController('window-a');
+		const internals = getInternals(controller);
+		const runtimeState = createRuntimeState(['window-a'], 47821);
+		runtimeReadMock.mockReturnValue(runtimeState);
+		runtimeGetLeaderWindowIdMock.mockReturnValue('window-a');
+
+		internals.currentTunnelState = { status: 'stopped', url: null, error: null };
+
+		await internals.reconcileBaseUrl();
+
+		expect(baseUrlEnsureMock).not.toHaveBeenCalled();
+	});
+
+	it('does not reconcile the base url from a non-leader window', async () => {
+		const { controller } = createController('window-b');
+		const internals = getInternals(controller);
+		const runtimeState = createRuntimeState(['window-a', 'window-b'], 47821);
+		runtimeReadMock.mockReturnValue(runtimeState);
+		runtimeGetLeaderWindowIdMock.mockReturnValue('window-a');
+
+		internals.currentTunnelState = { status: 'running', url: 'https://live.trycloudflare.com', error: null };
+
+		await internals.reconcileBaseUrl();
+
+		expect(baseUrlEnsureMock).not.toHaveBeenCalled();
 	});
 
 	it('marks tunnel desired from bootstrap when disk says tunnel was running', async () => {

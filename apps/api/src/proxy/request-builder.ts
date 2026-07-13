@@ -11,7 +11,7 @@ const VALID_EFFORTS: readonly ThinkingEffort[] = ['low', 'medium', 'high', 'xhig
 
 // Opus 4.7/4.8 reject manual budget_tokens (400). They use adaptive thinking,
 // controlled by the `effort` parameter in a top-level `output_config` object.
-// reasoning_budget is always a tier string ('low' | 'medium' | 'high' | 'xhigh')
+// reasoning_budget is always a tier string ('low' | 'medium' | 'high' | 'xhigh' | 'max')
 // set from the model mapping; pass it through verbatim as the effort level.
 function resolveEffort(budget: number | string | undefined): ThinkingEffort | null {
 	if (typeof budget !== 'string') {

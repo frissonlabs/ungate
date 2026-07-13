@@ -32,7 +32,8 @@ const reasoningOptions: { label: string; value: ModelMappingConfig['reasoningBud
 	{ label: 'Low', value: 'low' },
 	{ label: 'Medium', value: 'medium' },
 	{ label: 'High', value: 'high' },
-	{ label: 'XHigh', value: 'xhigh' }
+	{ label: 'XHigh', value: 'xhigh' },
+	{ label: 'Max', value: 'max' }
 ];
 
 function withSortOrder(items: ModelMappingConfig[]): ModelMappingConfig[] {
@@ -130,7 +131,7 @@ function updateModelAtIndex(index: number, key: keyof ModelMappingConfig, value:
 			}
 
 			if (key === 'reasoningBudget') {
-				if (value === 'low' || value === 'medium' || value === 'high' || value === 'xhigh' || value === null) {
+				if (value === 'low' || value === 'medium' || value === 'high' || value === 'xhigh' || value === 'max' || value === null) {
 					return { ...model, reasoningBudget: value };
 				}
 

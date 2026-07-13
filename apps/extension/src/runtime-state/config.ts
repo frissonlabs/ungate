@@ -42,7 +42,13 @@ export const config = {
 		// Request timeout for remote tunnel /health probes.
 		remoteHealthRequestTimeoutMs: 3000,
 		// Consecutive remote /health failures before refreshing the tunnel.
-		remoteHealthFailureThreshold: 3
+		remoteHealthFailureThreshold: 3,
+		// Base delay before respawning the tunnel after an unexpected process exit/error.
+		unexpectedRestartBaseDelayMs: 1000,
+		// Upper bound for the exponential backoff between unexpected restarts.
+		unexpectedRestartMaxDelayMs: 30000,
+		// Max consecutive unexpected restarts before giving up until manually restarted.
+		unexpectedRestartMaxAttempts: 10
 	},
 	extensionController: {
 		// Interval between heartbeat updates from the current window.
@@ -52,7 +58,13 @@ export const config = {
 		// Max wait time for tunnel URL while startup is in progress.
 		tunnelWaitTimeoutMs: 30000,
 		// Poll interval while waiting for tunnel URL readiness.
-		tunnelWaitPollIntervalMs: 250
+		tunnelWaitPollIntervalMs: 250,
+		// Interval for re-asserting the Cursor OpenAI Base URL in case Cursor
+		// clobbers it back to a stale tunnel value.
+		baseUrlReconcileIntervalMs: 5000,
+		// Delay after a key-fix toggle before re-asserting the base URL, giving
+		// Cursor time to flush its reactive-storage blob back to disk first.
+		baseUrlReconcileAfterKeyToggleMs: 400
 	},
 	openAiKeyFix: {
 		// Delay before first key-fix check after monitor startup.

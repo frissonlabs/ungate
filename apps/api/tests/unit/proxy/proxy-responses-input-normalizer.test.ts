@@ -5,12 +5,21 @@ import { ResponsesModelResolver } from 'src/proxy/responses-input-normalizer/res
 
 describe('proxy-responses-input-normalizer', () => {
 	it('resolves model aliases and reasoning defaults', () => {
-		expect(ResponsesModelResolver.resolveModel('')).toEqual({ model: 'gpt-5.4' });
+		expect(ResponsesModelResolver.resolveModel('')).toEqual({ model: 'gpt-5.6-sol' });
 		expect(ResponsesModelResolver.resolveModel('gpt-5.3-codex')).toEqual({ model: 'gpt-5.3-codex', reasoningEffort: 'medium' });
 		expect(ResponsesModelResolver.resolveModel('gpt-5.4-high')).toEqual({ model: 'gpt-5.4', reasoningEffort: 'high' });
 		expect(ResponsesModelResolver.resolveModel('gpt-5.1-any')).toEqual({
 			model: 'gpt-5.1-codex-mini',
 			reasoningEffort: 'medium'
+		});
+		expect(ResponsesModelResolver.resolveModel('gpt-5.6')).toEqual({ model: 'gpt-5.6-sol' });
+		expect(ResponsesModelResolver.resolveModel('gpt-5.6-terra-max')).toEqual({
+			model: 'gpt-5.6-terra',
+			reasoningEffort: 'max'
+		});
+		expect(ResponsesModelResolver.resolveModel('gpt-5.6-max')).toEqual({
+			model: 'gpt-5.6-sol',
+			reasoningEffort: 'max'
 		});
 	});
 

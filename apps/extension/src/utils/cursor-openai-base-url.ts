@@ -18,6 +18,18 @@ interface ReactiveStorageState {
 	[key: string]: unknown;
 }
 
+// Cursor can flush its in-memory reactive-storage model back over our write
+// (the same behavior that makes the OpenAI key-fix necessary), so after
+// writing we read the value back and retry a few times until it sticks.
+const WRITE_VERIFY_ATTEMPTS = 3;
+const WRITE_VERIFY_DELAY_MS = 150;
+
+function delay(ms: number): Promise<void> {
+	return new Promise((resolve) => {
+		setTimeout(resolve, ms);
+	});
+}
+
 export function shouldUpdateOpenAiBaseUrl(current: string | null | undefined, previousTunnelApiUrl: string | null): boolean {
 	if (current == null || current === '') {
 		return true;
@@ -49,6 +61,20 @@ export class CursorOpenAiBaseUrlWriter {
 	async updateFromTunnelUrl(tunnelUrl: string, previousTunnelUrl: string | null): Promise<OpenAiBaseUrlUpdateResult> {
 		const next = toTunnelApiUrl(tunnelUrl);
 		const previousApiUrl = previousTunnelUrl ? toTunnelApiUrl(previousTunnelUrl) : null;
+
+		return this.applyBaseUrl(next, previousApiUrl);
+	}
+
+	/**
+	 * Re-assert a known tunnel API URL without a "previous" reference. Used by the
+	 * periodic reconciler to restore the value when Cursor clobbers it back to a
+	 * stale tunnel URL.
+	 */
+	async ensureBaseUrl(apiUrl: string): Promise<OpenAiBaseUrlUpdateResult> {
+		return this.applyBaseUrl(apiUrl, null);
+	}
+
+	private async applyBaseUrl(next: string, previousApiUrl: string | null): Promise<OpenAiBaseUrlUpdateResult> {
 		const unavailableReason = await this.refreshReaderAvailability();
 
 		if (unavailableReason) {
@@ -76,8 +102,11 @@ export class CursorOpenAiBaseUrlWriter {
 				return { status: 'skipped', reason: 'OpenAI Base URL already matches tunnel' };
 			}
 
-			parsed.openAIBaseUrl = next;
-			await this.stateDbReader.writeItemTableValue(this.stateDbPath, REACTIVE_STORAGE_KEY, JSON.stringify(parsed));
+			const verified = await this.writeAndVerify(next);
+
+			if (!verified) {
+				return { status: 'failed', reason: 'Write did not persist (Cursor may have overwritten it)' };
+			}
 
 			return { status: 'updated', previous: current, next };
 		} catch (error) {
@@ -85,6 +114,39 @@ export class CursorOpenAiBaseUrlWriter {
 
 			return { status: 'failed', reason };
 		}
+	}
+
+	private async writeAndVerify(next: string): Promise<boolean> {
+		for (let attempt = 0; attempt < WRITE_VERIFY_ATTEMPTS; attempt += 1) {
+			// Re-read the blob each attempt so we merge onto whatever Cursor most
+			// recently flushed instead of clobbering concurrent changes to other
+			// fields in the same reactive-storage object.
+			const raw = await this.stateDbReader.readItemTableValue(this.stateDbPath, REACTIVE_STORAGE_KEY);
+
+			if (!raw) {
+				return false;
+			}
+
+			const parsed = JSON.parse(raw) as ReactiveStorageState;
+			parsed.openAIBaseUrl = next;
+			await this.stateDbReader.writeItemTableValue(this.stateDbPath, REACTIVE_STORAGE_KEY, JSON.stringify(parsed));
+
+			const confirmedRaw = await this.stateDbReader.readItemTableValue(this.stateDbPath, REACTIVE_STORAGE_KEY);
+
+			if (confirmedRaw) {
+				const confirmed = JSON.parse(confirmedRaw) as ReactiveStorageState;
+
+				if (confirmed.openAIBaseUrl === next) {
+					return true;
+				}
+			}
+
+			if (attempt < WRITE_VERIFY_ATTEMPTS - 1) {
+				await delay(WRITE_VERIFY_DELAY_MS);
+			}
+		}
+
+		return false;
 	}
 
 	private async refreshReaderAvailability(): Promise<string | null> {

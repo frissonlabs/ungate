@@ -50,9 +50,9 @@ export interface OpenAIChatRequest {
 	user?: string;
 	tools?: OpenAITool[];
 	tool_choice?: 'none' | 'auto' | 'required' | { type: 'function'; function: { name: string } };
-	reasoning_effort?: 'none' | 'low' | 'medium' | 'high' | 'xhigh';
+	reasoning_effort?: 'none' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 	reasoning?: {
-		effort?: 'none' | 'low' | 'medium' | 'high' | 'xhigh';
+		effort?: 'none' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 	};
 }
 

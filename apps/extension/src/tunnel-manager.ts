@@ -24,6 +24,19 @@ function getCloudflaredConfigArg(): string {
 	return process.platform === 'win32' ? 'NUL' : '/dev/null';
 }
 
+const RATE_LIMIT_ERROR = 'Cloudflare rate-limited quick tunnels (HTTP 429). Wait a few minutes, then click Start tunnel once.';
+
+function isRateLimitLogLine(line: string): boolean {
+	const normalized = line.toLowerCase();
+
+	return (
+		normalized.includes('429 too many requests') ||
+		normalized.includes('status_code="429') ||
+		normalized.includes('error code: 1015') ||
+		normalized.includes('rate limit')
+	);
+}
+
 export interface TunnelManagerCallbacks {
 	isExtensionHostActive(): boolean;
 	onStateChange(state: TunnelState): void;
@@ -43,6 +56,10 @@ export class TunnelManager {
 	private consecutiveRemoteFailures = 0;
 	private remoteHealthCheckInFlight = false;
 	private refreshInProgress = false;
+	private unexpectedRestartTimer: NodeJS.Timeout | null = null;
+	private unexpectedRestartAttempts = 0;
+	private lastSpawnFailure: string | null = null;
+	private lastSpawnWasRateLimited = false;
 
 	constructor(
 		windowId: string,
@@ -86,7 +103,9 @@ export class TunnelManager {
 
 	stop(): void {
 		this.stopRemoteHealthCheck();
+		this.clearUnexpectedRestart();
 		this.consecutiveRemoteFailures = 0;
+		this.unexpectedRestartAttempts = 0;
 
 		if (this.autoStopTimer) {
 			clearInterval(this.autoStopTimer);
@@ -205,6 +224,9 @@ export class TunnelManager {
 	}
 
 	private spawnTunnel(port: number): void {
+		this.lastSpawnFailure = null;
+		this.lastSpawnWasRateLimited = false;
+
 		const t = Tunnel.quick(`http://localhost:${port}`, {
 			'--config': getCloudflaredConfigArg(),
 			'--edge-ip-version': '4'
@@ -215,9 +237,12 @@ export class TunnelManager {
 			const previousUrl = this.state.url;
 			const pid = t.process?.pid ?? null;
 
+			this.lastSpawnFailure = null;
+			this.lastSpawnWasRateLimited = false;
 			this.callbacks.onLog({ timestamp: Date.now(), level: 'info', message: `Tunnel URL: ${url}` });
 			this.setState({ status: 'running', url, error: null }, pid);
 			this.consecutiveRemoteFailures = 0;
+			this.unexpectedRestartAttempts = 0;
 			this.scheduleAutoStop();
 			this.startRemoteHealthCheck();
 			this.callbacks.onTunnelUrl(url, previousUrl);
@@ -227,18 +252,31 @@ export class TunnelManager {
 			const lines = data.split('\n').filter((l) => l.trim());
 
 			for (const line of lines) {
+				if (isRateLimitLogLine(line)) {
+					this.lastSpawnWasRateLimited = true;
+					this.lastSpawnFailure = RATE_LIMIT_ERROR;
+				}
+
 				this.callbacks.onLog({ timestamp: Date.now(), level: 'info', message: line });
 			}
 		});
 
 		t.on('error', (err) => {
-			const message = err.message;
+			if (this.tunnel !== t) {
+				return;
+			}
+
+			const message = this.lastSpawnWasRateLimited ? RATE_LIMIT_ERROR : err.message;
 			this.callbacks.onLog({ timestamp: Date.now(), level: 'error', message: `Tunnel error: ${message}` });
 			this.stopRemoteHealthCheck();
 			this.setState({ status: 'error', url: null, error: message }, null);
 		});
 
 		t.on('exit', (code, signal) => {
+			if (this.tunnel !== t) {
+				return;
+			}
+
 			this.callbacks.onLog({
 				timestamp: Date.now(),
 				level: 'warn',
@@ -246,19 +284,108 @@ export class TunnelManager {
 			});
 
 			const wasStarting = this.state.status === 'starting';
+			const wasStopped = this.state.status === 'stopped';
+			const rateLimited = this.lastSpawnWasRateLimited;
 
 			this.stopRemoteHealthCheck();
 
-			if (this.state.status !== 'stopped') {
+			if (!wasStopped) {
+				const startupError = this.lastSpawnFailure ?? `Process exited before tunnel was ready (code=${code})`;
 				const next: TunnelState = wasStarting
-					? { status: 'error', url: null, error: `Process exited before tunnel was ready (code=${code})` }
+					? { status: 'error', url: null, error: startupError }
 					: { status: 'stopped', url: null, error: null };
 
 				this.setState(next, null);
 			}
 
 			this.tunnel = null;
+
+			// Rate limits get worse with retries; leave the tunnel down until the
+			// user waits and starts it again manually.
+			if (rateLimited) {
+				this.clearUnexpectedRestart();
+				this.callbacks.onLog({
+					timestamp: Date.now(),
+					level: 'error',
+					message: RATE_LIMIT_ERROR
+				});
+
+				return;
+			}
+
+			// A `stopped` state means we asked the tunnel to stop, so leave it down.
+			// Any other exit is unexpected (the cloudflared process died or the edge
+			// dropped it), so respawn it so the OpenAI Base URL keeps pointing at a
+			// live tunnel.
+			if (!wasStopped) {
+				this.scheduleUnexpectedRestart(code, signal);
+			}
 		});
+	}
+
+	private scheduleUnexpectedRestart(code: number | null, signal: NodeJS.Signals | null): void {
+		if (this.refreshInProgress || this.unexpectedRestartTimer) {
+			return;
+		}
+
+		const port = this.currentPort;
+
+		if (!port) {
+			return;
+		}
+
+		if (this.unexpectedRestartAttempts >= config.tunnelManager.unexpectedRestartMaxAttempts) {
+			this.callbacks.onLog({
+				timestamp: Date.now(),
+				level: 'error',
+				message: `Tunnel exited repeatedly (code=${code} signal=${signal}); giving up after ${this.unexpectedRestartAttempts} attempts. Restart it manually.`
+			});
+			this.setState(
+				{ status: 'error', url: null, error: `Tunnel stopped after ${this.unexpectedRestartAttempts} failed restarts` },
+				null
+			);
+
+			return;
+		}
+
+		const delay = Math.min(
+			config.tunnelManager.unexpectedRestartBaseDelayMs * 2 ** this.unexpectedRestartAttempts,
+			config.tunnelManager.unexpectedRestartMaxDelayMs
+		);
+		this.unexpectedRestartAttempts += 1;
+
+		this.callbacks.onLog({
+			timestamp: Date.now(),
+			level: 'warn',
+			message: `Tunnel down unexpectedly; restarting in ${delay}ms (attempt ${this.unexpectedRestartAttempts}/${config.tunnelManager.unexpectedRestartMaxAttempts})`
+		});
+
+		this.unexpectedRestartTimer = setTimeout(() => {
+			this.unexpectedRestartTimer = null;
+
+			if (this.tunnel || this.refreshInProgress || !this.currentPort) {
+				return;
+			}
+
+			// Call start() directly rather than restart() so stop() does not reset
+			// the attempt counter; this keeps the exponential backoff accumulating
+			// across consecutive unexpected exits until we hit the attempt cap.
+			void this.start(this.currentPort).catch((err: unknown) => {
+				const message = err instanceof Error ? err.message : String(err);
+				this.callbacks.onLog({
+					timestamp: Date.now(),
+					level: 'error',
+					message: `Tunnel auto-restart failed: ${message}`
+				});
+			});
+		}, delay);
+	}
+
+	private clearUnexpectedRestart(): void {
+		if (this.unexpectedRestartTimer) {
+			clearTimeout(this.unexpectedRestartTimer);
+			this.unexpectedRestartTimer = null;
+		}
 	}
 
 	private setState(next: TunnelState, pid: number | null): void {

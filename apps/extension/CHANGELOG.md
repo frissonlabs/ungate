@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.7.4 - 2026-07-12
+
+- Add GPT-5.6 Sol, Terra, and Luna model support (`ug-gpt-5.6*` IDs to avoid Cursor built-in conflicts)
+- Support `max` reasoning tier for GPT-5.6 models
+- Surface Cloudflare quick-tunnel rate limits clearly and stop auto-retrying them
+
 ## 1.7.3 - 2026-06-25
 
 - Fix Anthropic provider errors with non-JSON bodies so upstream failures return a normal error response instead of crashing the API

@@ -41,6 +41,8 @@ export class ExtensionController {
 	private runtimeStateSyncDebounce: NodeJS.Timeout | null = null;
 	private lastCommandId: string | null = null;
 	private extensionHostActive = false;
+	private baseUrlReconcileTimer: NodeJS.Timeout | null = null;
+	private baseUrlReconcileInFlight = false;
 
 	constructor(private readonly context: vscode.ExtensionContext) {}
 
@@ -67,6 +69,9 @@ export class ExtensionController {
 			},
 			() => {
 				return this.isLeaderWindow();
+			},
+			() => {
+				this.scheduleBaseUrlReconcileAfterKeyToggle();
 			}
 		);
 		this.baseUrlWriter = new CursorOpenAiBaseUrlWriter(this.context.globalStorageUri.fsPath, (message) => {
@@ -141,6 +146,7 @@ export class ExtensionController {
 		this.startHeartbeat();
 		this.startRuntimeSync();
 		this.startRuntimeStateWatch();
+		this.startBaseUrlReconcile();
 		void this.bootstrapRuntime()
 			.then(() => this.keyFix.activate())
 			.catch((error: unknown) => {
@@ -171,6 +177,11 @@ export class ExtensionController {
 		if (this.syncTimer) {
 			clearInterval(this.syncTimer);
 			this.syncTimer = null;
+		}
+
+		if (this.baseUrlReconcileTimer) {
+			clearInterval(this.baseUrlReconcileTimer);
+			this.baseUrlReconcileTimer = null;
 		}
 
 		if (this.runtimeStateSyncDebounce) {
@@ -544,6 +555,48 @@ export class ExtensionController {
 		this.syncTimer = setInterval(() => {
 			void this.syncFromRuntimeState().catch(() => {});
 		}, config.extensionController.runtimeSyncIntervalMs);
+	}
+
+	private startBaseUrlReconcile(): void {
+		this.baseUrlReconcileTimer = setInterval(() => {
+			void this.reconcileBaseUrl().catch(() => {});
+		}, config.extensionController.baseUrlReconcileIntervalMs);
+	}
+
+	private scheduleBaseUrlReconcileAfterKeyToggle(): void {
+		setTimeout(() => {
+			void this.reconcileBaseUrl().catch(() => {});
+		}, config.extensionController.baseUrlReconcileAfterKeyToggleMs);
+	}
+
+	private async reconcileBaseUrl(): Promise<void> {
+		if (this.baseUrlReconcileInFlight || !this.isLeaderWindow()) {
+			return;
+		}
+
+		if (this.currentTunnelState.status !== 'running') {
+			return;
+		}
+
+		const apiUrl = this.getTunnelApiUrl();
+
+		if (!apiUrl) {
+			return;
+		}
+
+		this.baseUrlReconcileInFlight = true;
+
+		try {
+			const result = await this.baseUrlWriter.ensureBaseUrl(apiUrl);
+
+			if (result.status === 'updated') {
+				this.log(`[openai-base-url] reconciled Cursor OpenAI Base URL back to ${result.next}`);
+			}
+		} catch (err: unknown) {
+			this.log(`[openai-base-url] reconcile failed: ${this.formatError(err)}`);
+		} finally {
+			this.baseUrlReconcileInFlight = false;
+		}
 	}
 
 	private startRuntimeStateWatch(): void {

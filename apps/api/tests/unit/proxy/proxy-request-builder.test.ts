@@ -35,7 +35,7 @@ describe('proxy-request-builder', () => {
 	});
 
 	it('passes each reasoning tier through verbatim as the effort level', () => {
-		for (const tier of ['low', 'medium', 'high', 'xhigh'] as const) {
+		for (const tier of ['low', 'medium', 'high', 'xhigh', 'max'] as const) {
 			const prepared = RequestBuilder.prepareClaudeCodeBody({
 				model: 'claude-opus-4-8',
 				max_tokens: 1024,

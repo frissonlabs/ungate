@@ -11,11 +11,22 @@ type InstallLogger = (message: string) => void;
 
 const WRITE_RETRY_ATTEMPTS = 3;
 const WRITE_RETRY_DELAY_MS = 100;
+// Cursor keeps state.vscdb open in WAL mode across every window, so a bare
+// UPDATE frequently collides with its lock. The sqlite3 CLI defaults to
+// busy_timeout=0 (fail immediately), so we set a timeout to let the write
+// block until Cursor releases the lock instead of throwing straight away.
+const BUSY_TIMEOUT_MS = 5000;
 
 function sleep(ms: number): Promise<void> {
 	return new Promise((resolve) => {
 		setTimeout(resolve, ms);
 	});
+}
+
+function isLockError(error: unknown): boolean {
+	const message = (error instanceof Error ? error.message : String(error)).toLowerCase();
+
+	return message.includes('busy') || message.includes('locked');
 }
 
 export class CursorStateDbReader {
@@ -42,7 +53,7 @@ export class CursorStateDbReader {
 
 		const escapedKey = key.replaceAll("'", "''");
 		const query = `SELECT value FROM ItemTable WHERE key = '${escapedKey}';`;
-		const { stdout } = await execFileAsync(this.cliPath, [dbPath, query]);
+		const { stdout } = await this.execWithBusyTimeout(dbPath, query);
 		const raw = stdout.trim();
 
 		return raw || null;
@@ -61,14 +72,13 @@ export class CursorStateDbReader {
 
 		for (let attempt = 0; attempt < WRITE_RETRY_ATTEMPTS; attempt += 1) {
 			try {
-				await execFileAsync(this.cliPath, [dbPath, query]);
+				await this.execWithBusyTimeout(dbPath, query);
 
 				return;
 			} catch (error) {
 				lastError = error;
-				const message = error instanceof Error ? error.message : String(error);
 
-				if (!message.toLowerCase().includes('busy') && !message.toLowerCase().includes('locked')) {
+				if (!isLockError(error)) {
 					throw error;
 				}
 
@@ -77,5 +87,15 @@ export class CursorStateDbReader {
 		}
 
 		throw lastError instanceof Error ? lastError : new Error(String(lastError));
+	}
+
+	private execWithBusyTimeout(dbPath: string, query: string): Promise<{ stdout: string; stderr: string }> {
+		if (!this.cliPath) {
+			throw new Error(SQLITE_CLI_UNAVAILABLE_REASON);
+		}
+
+		// `.timeout` sets the busy handler without emitting output (unlike
+		// `PRAGMA busy_timeout`, which would print a row and pollute reads).
+		return execFileAsync(this.cliPath, ['-cmd', `.timeout ${BUSY_TIMEOUT_MS}`, dbPath, query]);
 	}
 }

@@ -71,7 +71,8 @@ export class OpenAiKeyFix {
 		private readonly context: vscode.ExtensionContext,
 		private readonly onStateChange: StateChangeHandler,
 		private readonly log: Logger,
-		private readonly isLeaderWindow: () => boolean
+		private readonly isLeaderWindow: () => boolean,
+		private readonly onKeyToggled?: () => void
 	) {
 		const globalStorageDir = path.dirname(context.globalStorageUri.fsPath);
 		this.stateDbPath = path.join(globalStorageDir, config.files.stateDb);
@@ -269,7 +270,7 @@ export class OpenAiKeyFix {
 
 		const reason = onlyWhenExplicitlyOff ? 'key was disabled, re-enabling' : 'enabling OpenAI API Key in Cursor';
 		this.log(`${config.logPrefix} ${reason}`);
-		await vscode.commands.executeCommand(config.key.toggleCommand);
+		await this.runToggleCommand();
 	}
 
 	private async disableOpenAiKeyIfNeeded(): Promise<void> {
@@ -277,11 +278,19 @@ export class OpenAiKeyFix {
 			const current = await this.readUseOpenAiKey();
 
 			if (current === true) {
-				await vscode.commands.executeCommand(config.key.toggleCommand);
+				await this.runToggleCommand();
 			}
 		} catch (error) {
 			this.log(`${config.logPrefix} failed to disable key: ${String(error)}`);
 		}
+	}
+
+	private async runToggleCommand(): Promise<void> {
+		await vscode.commands.executeCommand(config.key.toggleCommand);
+		// Toggling the key makes Cursor rewrite the whole reactive-storage blob
+		// (which also holds openAIBaseUrl) from its in-memory model, so notify the
+		// controller to re-assert the tunnel base URL that Cursor may have clobbered.
+		this.onKeyToggled?.();
 	}
 
 	private async readUseOpenAiKey(): Promise<boolean | undefined> {

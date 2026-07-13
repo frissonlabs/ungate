@@ -57,9 +57,10 @@ describe('CursorOpenAiBaseUrlWriter', () => {
 	});
 
 	it('updates openAIBaseUrl for trycloudflare values', async () => {
-		mocks.readItemTableValueMock.mockResolvedValue(
-			JSON.stringify({ useOpenAIKey: true, openAIBaseUrl: 'https://old.trycloudflare.com/v1' })
-		);
+		const oldBlob = JSON.stringify({ useOpenAIKey: true, openAIBaseUrl: 'https://old.trycloudflare.com/v1' });
+		const newBlob = JSON.stringify({ useOpenAIKey: true, openAIBaseUrl: 'https://new.trycloudflare.com/v1' });
+		// Reads: initial current-value read, write-loop read, then verify read.
+		mocks.readItemTableValueMock.mockResolvedValueOnce(oldBlob).mockResolvedValueOnce(oldBlob).mockResolvedValueOnce(newBlob);
 		mocks.writeItemTableValueMock.mockResolvedValue(undefined);
 
 		const writer = new CursorOpenAiBaseUrlWriter('/tmp/globalStorage/ext');
@@ -70,6 +71,59 @@ describe('CursorOpenAiBaseUrlWriter', () => {
 			previous: 'https://old.trycloudflare.com/v1',
 			next: 'https://new.trycloudflare.com/v1'
 		});
+		expect(mocks.writeItemTableValueMock).toHaveBeenCalledWith(
+			'/tmp/globalStorage/state.vscdb',
+			'src.vs.platform.reactivestorage.browser.reactiveStorageServiceImpl.persistentStorage.applicationUser',
+			expect.stringContaining('"openAIBaseUrl":"https://new.trycloudflare.com/v1"')
+		);
+	});
+
+	it('retries the write when Cursor clobbers the value back', async () => {
+		const oldBlob = JSON.stringify({ useOpenAIKey: true, openAIBaseUrl: 'https://old.trycloudflare.com/v1' });
+		const newBlob = JSON.stringify({ useOpenAIKey: true, openAIBaseUrl: 'https://new.trycloudflare.com/v1' });
+		mocks.readItemTableValueMock
+			// initial current-value read
+			.mockResolvedValueOnce(oldBlob)
+			// attempt 1: read before write, then verify read still shows the old value
+			.mockResolvedValueOnce(oldBlob)
+			.mockResolvedValueOnce(oldBlob)
+			// attempt 2: read before write, then verify read confirms the new value
+			.mockResolvedValueOnce(oldBlob)
+			.mockResolvedValueOnce(newBlob);
+		mocks.writeItemTableValueMock.mockResolvedValue(undefined);
+
+		const writer = new CursorOpenAiBaseUrlWriter('/tmp/globalStorage/ext');
+		const result = await writer.updateFromTunnelUrl('https://new.trycloudflare.com', 'https://old.trycloudflare.com');
+
+		expect(result.status).toBe('updated');
+		expect(mocks.writeItemTableValueMock).toHaveBeenCalledTimes(2);
+	});
+
+	it('reports failure when the write never persists', async () => {
+		const oldBlob = JSON.stringify({ useOpenAIKey: true, openAIBaseUrl: 'https://old.trycloudflare.com/v1' });
+		// Every read keeps returning the stale value, so verification never passes.
+		mocks.readItemTableValueMock.mockResolvedValue(oldBlob);
+		mocks.writeItemTableValueMock.mockResolvedValue(undefined);
+
+		const writer = new CursorOpenAiBaseUrlWriter('/tmp/globalStorage/ext');
+		const result = await writer.updateFromTunnelUrl('https://new.trycloudflare.com', 'https://old.trycloudflare.com');
+
+		expect(result.status).toBe('failed');
+	});
+
+	it('re-asserts a known url via ensureBaseUrl', async () => {
+		const staleBlob = JSON.stringify({ useOpenAIKey: true, openAIBaseUrl: 'https://old.trycloudflare.com/v1' });
+		const freshBlob = JSON.stringify({ useOpenAIKey: true, openAIBaseUrl: 'https://new.trycloudflare.com/v1' });
+		mocks.readItemTableValueMock
+			.mockResolvedValueOnce(staleBlob)
+			.mockResolvedValueOnce(staleBlob)
+			.mockResolvedValueOnce(freshBlob);
+		mocks.writeItemTableValueMock.mockResolvedValue(undefined);
+
+		const writer = new CursorOpenAiBaseUrlWriter('/tmp/globalStorage/ext');
+		const result = await writer.ensureBaseUrl('https://new.trycloudflare.com/v1');
+
+		expect(result.status).toBe('updated');
 		expect(mocks.writeItemTableValueMock).toHaveBeenCalledWith(
 			'/tmp/globalStorage/state.vscdb',
 			'src.vs.platform.reactivestorage.browser.reactiveStorageServiceImpl.persistentStorage.applicationUser',

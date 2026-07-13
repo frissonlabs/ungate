@@ -46,7 +46,7 @@ describe('CursorStateDbReader', () => {
 		expect(value).toBe('{"useOpenAIKey":true}');
 		expect(mocks.execFileMock).toHaveBeenCalledWith(
 			'/usr/bin/sqlite3',
-			['/tmp/state.vscdb', "SELECT value FROM ItemTable WHERE key = 'cursorAuth/openAIKey';"],
+			['-cmd', '.timeout 5000', '/tmp/state.vscdb', "SELECT value FROM ItemTable WHERE key = 'cursorAuth/openAIKey';"],
 			expect.any(Function)
 		);
 	});
@@ -82,7 +82,12 @@ describe('CursorStateDbReader', () => {
 		expect(mocks.execFileMock).toHaveBeenCalledTimes(2);
 		expect(mocks.execFileMock).toHaveBeenLastCalledWith(
 			'/usr/bin/sqlite3',
-			['/tmp/state.vscdb', "UPDATE ItemTable SET value = '{\"useOpenAIKey\":true}' WHERE key = 'cursorAuth/openAIKey';"],
+			[
+				'-cmd',
+				'.timeout 5000',
+				'/tmp/state.vscdb',
+				"UPDATE ItemTable SET value = '{\"useOpenAIKey\":true}' WHERE key = 'cursorAuth/openAIKey';"
+			],
 			expect.any(Function)
 		);
 	});
